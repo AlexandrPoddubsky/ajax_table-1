@@ -1,0 +1,207 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function ajax_table_demo_menu() {
+  $items = array();
+  $items['ajax_table_demo'] = array(
+    'title' => 'ajax_table demo',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('ajax_table_demo_form'),
+		'access arguments'  => array('access content'),
+		'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+
+function ajax_table_demo_form($form, &$form_state) {
+
+  $count = 25;
+  $per_page = 5;
+  pager_default_initialize($count, $per_page);
+	$form['pager'] = array(
+		'#type' => 'ajax_pager',
+    '#element' => 0,
+	);
+  
+	$headers = array(
+		array('data' => t('Row index'), 'field' => 'index'),
+		array('data' => t('AJAXed textfield')),
+		array('data' => t('Value'), 'field' => 'value'),
+		array('data' => t('Action')),
+		array('data' => t('Weight')),    
+	);
+  
+	$form['table'] = array(
+    '#type' => 'ajax_table',
+		'#prefix' => '<div id="ajax-table-demo-form-debug-replace">',
+		'#suffix' => '</div>',
+		'#sticky' => FALSE,
+		'#header' => $headers,
+		'rows' => array(),
+		'#empty' => t('No entries.'),
+    '#attributes' => array(
+      'id' => 'ajax-table-id',
+    ),
+    // Adds ".draggable" class to rows
+    // Don't forget add weight field to header and to each row
+    '#draggable' => TRUE,
+    '#replacements' => array(),
+	);
+  drupal_add_tabledrag('ajax-table-id', 'order', 'sibling', 'ajax-table-weight');
+  
+	for ($i = 0; $i < $count; $i++) {
+		$index = array(
+			'#type' => 'value',
+      '#value' => $i,
+			'view' => array('#markup' => $i),
+		);
+    if (isset($form_state['rows'][$i])) {
+      $_value =
+        isset($form_state['rows'][$i]['input']['data']) ?
+        $form_state['rows'][$i]['input']['data'] : $i;
+    }
+    else {
+      $_value =
+        isset($form_state['values']['table']['rows'][$i]['input']['data']) ?
+        $form_state['values']['table']['rows'][$i]['input']['data'] : $i;
+    }
+    $input = array(
+      '#type' => 'textfield',
+      '#default_value' => $_value,
+      '#size' => 25,
+      '#index' => $i,
+      '#ajax' => array(
+        'wrapper' => "ajax-table-demo-form-value-$i",
+        'callback' => 'ajax_table_input_ajax_callback',
+        'progress' => array('type' => 'throbber'),
+        // Attention!!! Passing parameters to system/ajax call
+				'options' => drupal_parse_url(request_uri()),
+      ),
+    );
+
+    $value = array(
+			'#type' => 'value',
+      '#value' => $_value,
+			'view' => array(
+        '#prefix' => "<div id='ajax-table-demo-form-value-$i'>",
+        '#suffix' => '</div>',        
+        '#markup' => $_value,
+      ),
+    );
+    $action = array(
+      '#prefix' => "<div id='ajax-table-demo-form-action-$i'>",
+      '#suffix' => '</div>',
+      '#type' => 'submit',
+      '#submit' => array('ajax_table_action_submit'),
+      '#value' => t('Action'),
+      '#ajax' => array(
+        'wrapper' => "ajax-table-demo-form-action-$i",
+        'callback' => 'ajax_table_action_ajax_callback',
+        'progress' => array('type' => 'throbber'),
+        // Attention!!! Passing parameters to system/ajax call
+				'options' => drupal_parse_url(request_uri()),
+      ),
+    );
+    $row_weight = array(
+      '#type' => 'weight',
+      '#delta' => 20,
+      '#attributes' => array('class' => array('ajax-table-weight')),
+    );
+		$form['table']['rows'][$i] = array(
+			'index'		=> array(
+        'data' => $index,
+        '#attributes' => array(
+          'class' => array('cell-index-class')
+        )
+      ),
+			'input'		=> array('data' => $input),
+			'value'		=> array('data' => $value),
+			'action'  => array('data' => $action),
+			'weight'  => array('data' => $row_weight),
+      '#attributes' => array(
+        'class' => array("row-class-$i"),
+      ),
+		);
+		unset($index);
+		unset($input);		
+		unset($value);
+		unset($action);
+		unset($row_weight);    
+	}
+  // Emulate DB request sorting and paging parameters
+  $order = isset($_GET['order']) ? $_GET['order'] : '';
+  $sort = isset($_GET['sort']) ? $_GET['sort'] : '';
+  $r = $form['table']['rows'];
+  foreach ($headers as $header) {
+    if (!is_array($header)) continue;
+    if (!isset($header['field'])) continue;    
+    if (!isset($header['data']) || $order != $header['data']) continue;
+    if ($sort == 'asc' || $sort == 'desc') $sort = $sort;
+    elseif (isset($header['sort']) &&
+      $header['sort'] == 'asc' || $header['sort'] == 'desc'
+    ) $sort = $header['sort'];
+    else $sort = 'asc';
+    // Uses PHP 5.3 closures
+    uasort($form['table']['rows'], uasort_compare($header['field'], $sort));
+  }
+  $page = pager_find_page();
+  
+  $form['table']['rows'] = array_slice($form['table']['rows'], $page * $per_page, $per_page, TRUE);
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Devel dpm() debug and rebuild form'),
+    '#submit' => array('ajax_table_demo_form_submit'),
+    '#ajax' => array(
+      'wrapper' => 'ajax-table-demo-form-debug-replace',
+      'callback' => 'ajax_table_debug_ajax_callback',
+      'progress' => array('type' => 'throbber'),
+      // Attention!!! Passing parameters to system/ajax call
+      'options' => drupal_parse_url(request_uri()),
+    ),
+  );
+  
+	return $form;
+}
+
+function ajax_table_action_submit(&$form, &$form_state) {
+  $form_state['rebuild'] = TRUE;
+}
+
+function ajax_table_input_ajax_callback(&$form, &$form_state) {
+	if(isset($form_state['triggering_element']['#index']))
+		$index = $form_state['triggering_element']['#index'];
+	else return '';
+  return $form['table']['rows'][$index]['value']['data']['view'];
+}
+
+function ajax_table_action_ajax_callback(&$form, &$form_state) {
+  return 'done';
+}
+
+function ajax_table_debug_ajax_callback(&$form, &$form_state) {
+  return theme('status_messages') . t('Table is gone');//drupal_render($form['table']);
+}
+
+// Uses PHP 5.3 closures
+function uasort_compare() {
+  $params = func_get_args();
+  $comparer = function($a, $b) use ($params) {
+    if (!isset($params[0]) || !isset($params[1])) return 0;
+    $a = $a[$params[0]]['data']['#value'];
+    $b = $b[$params[0]]['data']['#value'];
+    if ($a == $b) return 0;
+    if ($params[1] == 'desc') return ($a > $b) ? -1 : 1;  
+    else return ($a < $b) ? -1 : 1;      
+  };
+  return $comparer;
+}
+
+function ajax_table_demo_form_submit(&$form, &$form_state) {
+  $form_state['rebuild'] = TRUE;
+  if (function_exists('dpm')) dpm($form_state);
+  if (function_exists('dpm')) dpm($form);
+}

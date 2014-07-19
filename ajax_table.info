@@ -1,0 +1,4 @@
+name = AJAX Table
+description = AJAX sorting, paging support for tables. Supporting AJAXed form elements inside tables.
+package = Other
+core = 7.x

@@ -1,0 +1,6 @@
+name = AJAX Table DEMO
+description = Demo page for AJAX Table module
+package = Other
+core = 7.x
+
+dependencies[] = ajax_table

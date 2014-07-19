@@ -1,0 +1,344 @@
+<?php
+
+module_load_include('inc', 'ajax_table', 'ajax_table.theme');
+
+define('AJAX_TABLE_DEFAULT_CALLBACK', 'admin/system/ajax_table_callback');
+
+/**
+ * There are two ways of implementing AJAX features into table and pager
+ * First one is JS way, script can easily replace sort and page links
+ * with another ones and attach AJAX to them.
+ * Pros: less code
+ * Cons: using URL parser, links updating after full page load, markup dependent
+ * Second is generating links on the server, creating own theme functions,
+ * based on existing table and pager functions.
+ * Pros: "native" AJAX links, no additionsl libraries
+ * Cons: a lot of copypasted code
+ */
+ 
+ /**
+ * Implements hook_menu().
+ */
+function ajax_table_menu() {
+  $items = array();
+  
+  // Callback for table pager/sort AJAX
+  $items[AJAX_TABLE_DEFAULT_CALLBACK . '/%ajax_table_key/%ajax_table_js'] = array(
+    'page callback'    => 'ajax_table_callback',
+    'page arguments'  => array(3,4),
+    'access callback' => 1,
+    'delivery callback' => 'ajax_deliver',
+    'type' => MENU_CALLBACK,
+  );
+  
+  return $items;
+}
+
+/**
+ * Load key form $_SESSION
+ */
+function ajax_table_key_load($key) {
+  if (isset($_SESSION['ajax_table_data'][$key]))
+    return $_SESSION['ajax_table_data'][$key];
+  return 0;
+}
+
+/**
+ * Determine if JS turned on
+ */
+function ajax_table_js_load($js) {
+  if ($js == 'ajax') return TRUE;
+  return 0;
+}
+
+/**
+ * Callback function returning AJAX commands to replace wrappers
+ */
+function ajax_table_callback($data = FALSE, $js = FALSE) {
+  if (!$js) {
+    drupal_set_message(t('Please turn on javascript support in your web browser.'), 'error');
+    drupal_goto();
+  }
+  if (!$data) return array('#type' => 'ajax', '#commands' => array());
+  // Get build_id to retrieve form from cache
+  $form_state = form_state_defaults();
+  $form = form_get_cache($data['build_id'], $form_state);
+  $form_state['rebuild_info']['copy']['#build_id'] = $data['build_id'];
+  $form_state['values'] = array();
+  unset($form_state['no_cache']);
+  // Saving and processing values happens inside form_builder function
+  // drupal_rebuild_form do all nessesary stuff to archieve that
+  // Basically, rebuilding invoked on form submit
+  // In order to save form state and eneterd values
+  // $form_state must be saved in cache (default form caching mechanism)
+  // for further retrieving
+  $form = drupal_rebuild_form($form['#form_id'], $form_state, $form);
+  // FUCK YEAH!!! SUCK MY BALLS!!!
+
+  // Generating replacing commands
+  $commands = array();
+  foreach ($data['wrappers'] as $id => $parents) {
+    $key_exists = FALSE;
+    $element = drupal_array_get_nested_value($form, $parents, $key_exists);
+    if ($key_exists) {
+      // Remove unnesessary wrapper, we already have one
+      // #prefix-#suffix wrapper will be saved after js replacement
+      unset($element['#prefix']);
+      unset($element['#suffix']);
+      $commands[] = array(
+        'command' => 'proper_replace',
+        'selector' => '#' . $id,
+        'data' => drupal_render($element),
+      );    
+    }
+  }
+  // Remove non-existing data
+  $query = db_select('cache_form', 'cf');
+    $query->fields('cf', array('cid'));
+  $result = $query
+    ->execute()
+    ->fetchCol(0);
+  $cached_forms = array();
+  foreach ($result as $key => $value) {
+     $value = str_ireplace('form_state_', '', $value);
+     $value = str_ireplace('form_', '', $value);
+     $cached_forms[$value] = $value;
+  }
+  foreach ($_SESSION['ajax_table_data'] as $key => $data) {
+    if (!isset($cached_forms[$data['build_id']]))
+      unset($_SESSION['ajax_table_data'][$key]);
+  }
+  // Return commands
+  return array(
+    '#type' => 'ajax',
+    '#commands' => $commands,
+  );
+}
+
+/**
+ * Implements hook_flush_caches().
+ */
+function ajax_table_flush_caches() {
+  $_SESSION['ajax_table_data'] = array();
+}
+
+/**
+ * Adding ajax_table as type
+ *
+ * This made for providing after_build property with default value
+ */
+function ajax_table_element_info() {
+  $types['ajax_table'] = array(
+    '#attributes' => array(),
+    '#sticky' => FALSE,
+    '#tree' => TRUE,
+    '#theme' => 'ajax_table',  
+    '#header' => array(),
+    'rows' => array(),
+    '#empty' => t('No entries'),
+    '#after_build' => array('ajax_table_after_build'),   
+    '#element' => 0,
+    '#ajax_table_callback' => AJAX_TABLE_DEFAULT_CALLBACK,
+    '#ajax_table_wrapper' => '',
+    '#replacements' => FALSE,
+    '#draggable' => FALSE,
+    '#caption' => NULL,
+    '#colgroups' => array(),
+    '#draggable_groups' => FALSE,
+  );
+  $types['ajax_pager'] = array(
+    '#tags' => array(),
+    '#element' => 0,
+    '#parameters' => array(),
+    '#quantity' => 9,
+    '#theme' => 'ajax_pager',
+    '#after_build' => array('ajax_table_after_build'),
+    '#ajax_table_callback' => AJAX_TABLE_DEFAULT_CALLBACK,
+    '#ajax_table_wrapper' => '',    
+    '#tags' => array(),
+  );  
+  return $types;
+}
+
+/**
+ * Gets build_id and saves it in $_SESSION
+ *
+ * system/ajax and ajax_get_form calls depend on $_POST['form_build_id'],
+ * so if no POST action performed, standart AJAX update call will fail.
+ *
+ * If there are no build_id in $_POST, we must save it separately,
+ * saving build_id in $_SESSION seems to be the best solution.
+ *
+ * There may be multiple ajax_table elements on the form
+ * and saved structure must be build_id and element dependent 
+ */
+function ajax_table_after_build($form_element, &$form_state) {
+  $build_id = $form_state['complete form']['#build_id'];
+  $wrapper_id = $form_element['#id'];
+  $form_element['#attributes'] += array('id' => $wrapper_id . '-element-id');
+  $table_id = $form_element['#attributes']['id'];
+  $key = ajax_table_generate_session_key($build_id, $form_element['#element']);
+  if ($key) {
+    if (!isset($_SESSION['ajax_table_data'][$key]))
+      $_SESSION['ajax_table_data'][$key] = array();
+    $_SESSION['ajax_table_data'][$key]['build_id'] = $build_id;
+    // Default replacements
+    if (!isset($_SESSION['ajax_table_data'][$key]['wrappers']))
+      $_SESSION['ajax_table_data'][$key]['wrappers'] = array();
+    $_SESSION['ajax_table_data'][$key]['wrappers'][$wrapper_id] =
+      $form_element['#array_parents'];
+    // Additional replacements
+    if (isset($form_element['#replacements']) &&
+      is_array($form_element['#replacements'])
+    ) {
+      foreach ($form_element['#replacements'] as $replace_wrapper => $parents) {
+        $_SESSION['ajax_table_data'][$key]['wrappers'][$replace_wrapper] =
+          $parents;
+      }
+    }      
+    $form_element['#ajax_table_callback'] .= '/' . $key . '/nojs';
+    $form_element['#ajax_table_wrapper'] = $wrapper_id;
+    // Force form cache
+    $form_state['cache'] = TRUE;
+    unset($form_state['no_cache']);   
+    $form_state['rebuild_info']['copy']['#build_id'] = $build_id;
+  }
+  return $form_element;
+}
+
+/**
+ * Generate form key for $_SESSION variable
+ */
+function ajax_table_generate_session_key($build_id = FALSE, $element = FALSE) {
+  if (!$build_id) return FALSE;
+  $data = $build_id . '-' . $element;
+  return drupal_hash_base64($data);
+}
+
+/**
+ * Removes properties from array
+ */
+function ajax_table_strip_properties(&$elements) {
+  foreach ($elements as $key => $value)
+    if ($key !== '' && $key[0] === '#') unset($elements[$key]);
+}
+
+/**
+ * From common.inc drupal_common_theme
+ */
+function ajax_table_theme($existing, $type, $theme, $path) {
+  return array(
+    'ajax_table' => array(
+      'render element' => 'elements',
+    ),    
+    'ajax_pager' => array(
+      'render element' => 'elements',
+    ),       
+    'ajax_pager_first' => array(
+      'variables' => array('text' => NULL, 'element' => 0, 'parameters' => array()),
+    ),
+    'ajax_pager_previous' => array(
+      'variables' => array('text' => NULL, 'element' => 0, 'interval' => 1, 'parameters' => array()),
+    ),
+    'ajax_pager_next' => array(
+      'variables' => array('text' => NULL, 'element' => 0, 'interval' => 1, 'parameters' => array()),
+    ),
+    'ajax_pager_last' => array(
+      'variables' => array('text' => NULL, 'element' => 0, 'parameters' => array()),
+    ),
+    'ajax_pager_link' => array(
+      'variables' => array('text' => NULL, 'page_new' => NULL, 'element' => NULL, 'parameters' => array(), 'attributes' => array()),
+    ),
+  );
+}
+
+/**
+ * Helper weight/parent process function
+ */
+function _ajax_table_tabledrag_process(&$rows,
+  $weight_path = array('tabledrag', 'weight'), $index_path = FALSE,
+  $parent_path = FALSE, $depth_path = FALSE
+) {
+  // Support different tabledrag paths
+  $_rows = array();
+  foreach ($rows as $i => $row) {
+    $_rows[$i] = array(
+      'weight' => 0,
+      'index' => $i,
+      'parent' => 0,
+      'depth' => 0,
+    );
+    if ($weight_path) {
+      $weight = &drupal_array_get_nested_value($row, $weight_path, $key_exists);
+      if (isset($key_exists) && $key_exists) $_rows[$i]['weight'] = &$weight;
+    }
+    if ($index_path) {
+      $index = &drupal_array_get_nested_value($row, $index_path, $key_exists);
+      if (isset($key_exists) && $key_exists) $_rows[$i]['index'] = &$index;
+    }    
+    if ($parent_path) {
+      $parent = &drupal_array_get_nested_value($row, $parent_path, $key_exists);
+      if (isset($key_exists) && $key_exists) $_rows[$i]['parent'] = &$parent;
+    }    
+    if ($depth_path) {
+      $depth = &drupal_array_get_nested_value($row, $depth_path, $key_exists);
+      if (isset($key_exists) && $key_exists) $_rows[$i]['depth'] = &$depth;
+    }
+  }
+  // Weight process
+  if ($weight_path) {
+    $weights = array();
+    foreach ($_rows as $i => $row) {
+      $weights[$i] = (string) $row['weight'];
+    }
+    $first = array_flip(array_reverse($weights, TRUE));
+    foreach ($_rows as $i => $row) {
+      $weight = &$weights[$i];
+      if ($first[$weight] == $i) continue;
+      while (in_array($weight + 0.001, $weights)) $weight += 0.001;
+      $weight += 0.001;
+      $row['weight'] = $weight;
+    }
+    asort($weights);
+    $input = $rows;
+    $rows = array();
+    foreach ($weights as $i => $weight) {
+      $rows[$i] = $input[$i];
+    }
+  }
+  // Parent / Depth process
+  if ($index_path && $parent_path && $depth_path) {
+    $parents = array();
+    foreach ($_rows as $i => $row) {
+      $parents[$i] = $row['parent'];
+    }
+    $leaf = array_reverse(array_filter($parents), TRUE);
+    $root = array_diff_key($parents, $leaf);
+    $depths = $root ?
+      array_combine(array_keys($root), array_fill(0, count($root), 0)) : array();
+    $nothing_to_add = FALSE;
+    while (!$nothing_to_add) {
+      $nothing_to_add = TRUE;
+      foreach ($leaf as $i => $parent) {
+        $j = array_search($parent, array_keys($root));
+        if ($j === FALSE) continue;
+        $j++;
+        // Insert
+        $prefix = array_slice($root, 0, $j, TRUE);
+        $suffix = array_slice($root, $j, NULL, TRUE);
+        $root = $prefix + array($i => $parent) + $suffix;
+        // Update depth
+        $depths[$i] = $depths[$parent] + 1;
+        unset($leaf[$i]);
+        $nothing_to_add = FALSE;
+        break;
+      }
+    }
+    $input = $rows;
+    $rows = array();
+    foreach ($root as $i => $parent) {
+      $rows[$i] = $input[$i];
+      $rows[$i]['depth'] = $depths[$i];
+    }
+  }
+}
